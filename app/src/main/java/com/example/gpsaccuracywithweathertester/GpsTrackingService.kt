@@ -12,6 +12,7 @@ import android.location.LocationListener
 import android.location.LocationManager
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import org.json.JSONArray
 import org.json.JSONObject
@@ -29,6 +30,7 @@ class GpsTrackingService : Service(), LocationListener {
 
     private lateinit var locationManager: LocationManager
     private lateinit var scheduler: ScheduledExecutorService
+    private var wakeLock: PowerManager.WakeLock? = null
 
     @Volatile
     private var latestSample: JSONObject? = null
@@ -40,6 +42,7 @@ class GpsTrackingService : Service(), LocationListener {
         scheduler = Executors.newSingleThreadScheduledExecutor()
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, buildNotification("Trwa zbieranie danych GPS"))
+        acquireWakeLock()
         startLocationUpdates()
         startUploadScheduler()
     }
@@ -124,10 +127,24 @@ class GpsTrackingService : Service(), LocationListener {
             rows.put(row)
         }
 
+        val values = JSONArray()
+        if (includeHeaders) {
+            values.put(JSONArray(headers))
+        }
+        for (i in 0 until rows.length()) {
+            values.put(rows.getJSONArray(i))
+        }
+
         return JSONObject()
-            .put("include_headers", includeHeaders)
-            .put("headers", JSONArray(headers))
-            .put("rows", rows)
+            .put("values", values)
+    }
+
+    private fun acquireWakeLock() {
+        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+        wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "gpslogger::tracking").apply {
+            setReferenceCounted(false)
+            acquire()
+        }
     }
 
     private fun formatTimestamp(timestampMillis: Long): String {
@@ -137,6 +154,7 @@ class GpsTrackingService : Service(), LocationListener {
 
     override fun onDestroy() {
         super.onDestroy()
+        wakeLock?.let { if (it.isHeld) it.release() }
         try {
             locationManager.removeUpdates(this)
         } catch (_: SecurityException) {
