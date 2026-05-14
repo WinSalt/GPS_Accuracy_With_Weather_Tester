@@ -77,6 +77,7 @@ class MainActivity : ComponentActivity() {
         getSharedPreferences(GpsTrackingService.PREFS, Context.MODE_PRIVATE)
             .edit()
             .putString(GpsTrackingService.PREF_WEBHOOK_URL, webhookUrl)
+            .putBoolean(GpsTrackingService.PREF_HEADERS_SENT, false)
             .apply()
     }
 }
@@ -109,6 +110,6 @@ private fun TrackerScreen(
 
         Button(onClick = onStop) { Text("Stop") }
 
-        Text("Aplikacja zapisuje: timestamp, latitude, longitude, accuracy_m, speed_mps i wysyła paczki co 5 minut.")
+        Text("Aplikacja co 5 minut wysyła 1 najnowszy punkt; po błędzie doda go do bufora i wyśle zaległe punkty w kolejnym cyklu. Format: wiersze + jednorazowe nagłówki.")
     }
 }

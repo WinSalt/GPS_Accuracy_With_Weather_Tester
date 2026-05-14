@@ -26,7 +26,10 @@ class GpsTrackingService : Service(), LocationListener {
 
     private lateinit var locationManager: LocationManager
     private lateinit var scheduler: ScheduledExecutorService
-    private val samples = mutableListOf<JSONObject>()
+
+    @Volatile
+    private var latestSample: JSONObject? = null
+    private val pendingSamples = mutableListOf<JSONObject>()
 
     override fun onCreate() {
         super.onCreate()
@@ -38,18 +41,11 @@ class GpsTrackingService : Service(), LocationListener {
         startUploadScheduler()
     }
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        return START_STICKY
-    }
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
 
     private fun startLocationUpdates() {
         try {
-            locationManager.requestLocationUpdates(
-                LocationManager.GPS_PROVIDER,
-                5_000L,
-                0f,
-                this
-            )
+            locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, 5_000L, 0f, this)
         } catch (_: SecurityException) {
             stopSelf()
         }
@@ -57,33 +53,34 @@ class GpsTrackingService : Service(), LocationListener {
 
     private fun startUploadScheduler() {
         scheduler.scheduleAtFixedRate({
-            val payload = synchronized(samples) {
-                if (samples.isEmpty()) return@scheduleAtFixedRate null
-                JSONArray(samples.toList()).also { samples.clear() }
-            } ?: return@scheduleAtFixedRate
-
-            postWebhook(payload)
+            val snapshot = latestSample ?: return@scheduleAtFixedRate
+            synchronized(pendingSamples) {
+                pendingSamples.add(JSONObject(snapshot.toString()))
+            }
+            postPendingSamples()
         }, 5, 5, TimeUnit.MINUTES)
     }
 
     override fun onLocationChanged(location: Location) {
-        val item = JSONObject()
+        latestSample = JSONObject()
             .put("timestamp", System.currentTimeMillis())
             .put("latitude", location.latitude)
             .put("longitude", location.longitude)
             .put("accuracy_m", location.accuracy)
             .put("speed_mps", location.speed)
             .put("provider", location.provider)
-
-        synchronized(samples) {
-            samples.add(item)
-        }
     }
 
-    private fun postWebhook(data: JSONArray) {
-        val webhookUrl = getSharedPreferences(PREFS, MODE_PRIVATE)
-            .getString(PREF_WEBHOOK_URL, null)
-            ?: return
+    private fun postPendingSamples() {
+        val webhookUrl = getSharedPreferences(PREFS, MODE_PRIVATE).getString(PREF_WEBHOOK_URL, null) ?: return
+
+        val samplesToSend = synchronized(pendingSamples) {
+            if (pendingSamples.isEmpty()) return
+            pendingSamples.map { JSONObject(it.toString()) }
+        }
+
+        val includeHeaders = !getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(PREF_HEADERS_SENT, false)
+        val payload = buildRowsPayload(samplesToSend, includeHeaders)
 
         var connection: HttpURLConnection? = null
         try {
@@ -95,21 +92,40 @@ class GpsTrackingService : Service(), LocationListener {
                 setRequestProperty("Content-Type", "application/json")
             }
 
-            val body = JSONObject().put("samples", data).toString()
             BufferedOutputStream(connection.outputStream).use { out ->
-                out.write(body.toByteArray())
+                out.write(payload.toString().toByteArray())
             }
 
-            connection.responseCode
-        } catch (_: Exception) {
-            synchronized(samples) {
-                for (i in 0 until data.length()) {
-                    samples.add(data.getJSONObject(i))
+            val success = connection.responseCode in 200..299
+            if (success) {
+                synchronized(pendingSamples) {
+                    pendingSamples.clear()
+                }
+                if (includeHeaders) {
+                    getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean(PREF_HEADERS_SENT, true).apply()
                 }
             }
+        } catch (_: Exception) {
+            // dane zostają w pendingSamples i zostaną wysłane w następnym cyklu
         } finally {
             connection?.disconnect()
         }
+    }
+
+    private fun buildRowsPayload(samples: List<JSONObject>, includeHeaders: Boolean): JSONObject {
+        val headers = listOf("timestamp", "latitude", "longitude", "accuracy_m", "speed_mps", "provider")
+        val rows = JSONArray()
+
+        for (sample in samples) {
+            val row = JSONArray()
+            headers.forEach { key -> row.put(sample.opt(key)) }
+            rows.put(row)
+        }
+
+        return JSONObject()
+            .put("include_headers", includeHeaders)
+            .put("headers", JSONArray(headers))
+            .put("rows", rows)
     }
 
     override fun onDestroy() {
@@ -125,11 +141,7 @@ class GpsTrackingService : Service(), LocationListener {
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                CHANNEL_ID,
-                "GPS Logger",
-                NotificationManager.IMPORTANCE_LOW
-            )
+            val channel = NotificationChannel(CHANNEL_ID, "GPS Logger", NotificationManager.IMPORTANCE_LOW)
             val manager = getSystemService(NotificationManager::class.java)
             manager.createNotificationChannel(channel)
         }
@@ -155,6 +167,7 @@ class GpsTrackingService : Service(), LocationListener {
     companion object {
         const val PREFS = "gps_logger_prefs"
         const val PREF_WEBHOOK_URL = "pref_webhook_url"
+        const val PREF_HEADERS_SENT = "pref_headers_sent"
         private const val CHANNEL_ID = "gps_logger_channel"
         private const val NOTIFICATION_ID = 1001
     }
