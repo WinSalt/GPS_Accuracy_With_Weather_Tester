@@ -18,6 +18,9 @@ import org.json.JSONObject
 import java.io.BufferedOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
@@ -63,11 +66,10 @@ class GpsTrackingService : Service(), LocationListener {
 
     override fun onLocationChanged(location: Location) {
         latestSample = JSONObject()
-            .put("timestamp", System.currentTimeMillis())
+            .put("timestamp", formatTimestamp(System.currentTimeMillis()))
             .put("latitude", location.latitude)
             .put("longitude", location.longitude)
             .put("accuracy_m", location.accuracy)
-            .put("speed_mps", location.speed)
             .put("provider", location.provider)
     }
 
@@ -113,7 +115,7 @@ class GpsTrackingService : Service(), LocationListener {
     }
 
     private fun buildRowsPayload(samples: List<JSONObject>, includeHeaders: Boolean): JSONObject {
-        val headers = listOf("timestamp", "latitude", "longitude", "accuracy_m", "speed_mps", "provider")
+        val headers = listOf("timestamp", "latitude", "longitude", "accuracy_m", "provider")
         val rows = JSONArray()
 
         for (sample in samples) {
@@ -126,6 +128,11 @@ class GpsTrackingService : Service(), LocationListener {
             .put("include_headers", includeHeaders)
             .put("headers", JSONArray(headers))
             .put("rows", rows)
+    }
+
+    private fun formatTimestamp(timestampMillis: Long): String {
+        val formatter = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault())
+        return formatter.format(Date(timestampMillis))
     }
 
     override fun onDestroy() {
